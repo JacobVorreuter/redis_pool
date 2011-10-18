@@ -24,18 +24,19 @@
 -behaviour(gen_server).
 
 %% gen_server callbacks
--export([start_link/1, start_link/2, init/1, handle_call/3,
-          handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([start_link/0, start_link/1, start_link/2, init/1, handle_call/3,
+          handle_cast/2, handle_info/2, terminate/2, code_change/3, stop/1]).
 
--compile(export_all).
+-export([q/2, q/3]).
 
--define(NL, <<"\r\n">>).
-
--record(state, {ip = "127.0.0.1", port = 6379, db = 0, pass, socket}).
+-include_lib("../include/redis.hrl").
 
 -define(TIMEOUT, 5000).
 
 %% API functions
+start_link() ->
+    start_link([]).
+
 start_link(Opts) ->
     gen_server:start_link(?MODULE, [Opts], []).
 
@@ -78,8 +79,8 @@ stop(Pid) ->
 %%--------------------------------------------------------------------
 init([Opts]) ->
     io:format("init redis worker: ~p~n", [self()]),
-    State = parse_options(Opts, #state{}),
-    case connect(State#state.ip, State#state.port, State#state.pass) of
+    State = redis_util:parse_options(Opts),
+    case redis_net:connect(State#state.ip, State#state.port, State#state.pass) of
         {ok, Socket} ->
             {ok, State#state{socket=Socket}};
         Error ->
@@ -97,7 +98,7 @@ init([Opts]) ->
 %%--------------------------------------------------------------------
 handle_call({q, Parts}, _From, #state{socket=Socket, ip=Ip, port=Port, pass=Pass}=State) ->
     Packet = redis_proto:build(Parts),
-    case send_recv(Socket, Ip, Port, Pass, Packet, 1) of
+    case redis_net:send_recv(Socket, Ip, Port, Pass, Packet, 1) of
         {error, Error} ->
             {stop, Error, State};
         {Reply, NewSocket} ->
@@ -136,7 +137,7 @@ handle_info(_Info, State) ->
 %% The return value is ignored.
 %%--------------------------------------------------------------------
 terminate(_Reason, State) ->
-    disconnect(State#state.socket),
+    redis_net:disconnect(State#state.socket),
     ok.
 
 %%--------------------------------------------------------------------
@@ -145,129 +146,3 @@ terminate(_Reason, State) ->
 %%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-%%--------------------------------------------------------------------
-%% Internal functions
-%%--------------------------------------------------------------------
-disconnect(Socket) ->
-    catch gen_tcp:close(Socket).
-
-parse_options([], State) ->
-    State;
-parse_options([{ip, Ip} | Rest], State) ->
-    parse_options(Rest, State#state{ip = Ip});
-parse_options([{port, Port} | Rest], State) ->
-    parse_options(Rest, State#state{port = Port});
-parse_options([{db, Db} | Rest], State) ->
-    parse_options(Rest, State#state{db = Db});
-parse_options([{pass, Pass} | Rest], State) ->
-    parse_options(Rest, State#state{pass = Pass}).
-
-connect(Ip, Port, Pass) ->
-    case gen_tcp:connect(Ip, Port, [binary, {active, false}, {keepalive, true}, {nodelay, true}]) of
-        {ok, Sock} when Pass == undefined; Pass == <<>>; Pass == "" ->
-            {ok, Sock};
-        {ok, Sock} ->
-            case redis_proto:send_auth(Sock, Pass) of
-                true -> {ok, Sock};
-                Err -> Err
-            end;
-        Err ->
-            Err
-    end.
-
-send_recv(_Socket, _Ip, _Port, _Pass, _Packet, 0) ->
-    {error, closed};
-
-send_recv(Socket, Ip, Port, Pass, Packet, Retries) when is_port(Socket) ->
-    case gen_tcp:send(Socket, Packet) of
-        ok ->
-            case read_resp(Socket, pipelined_packet_count(Packet)) of
-                {error, Err} ->
-                    disconnect(Socket),
-                    {error, Err};
-                {redis_error, Err} ->
-                    {{error, Err}, Socket};
-                Reply ->
-                    {Reply, Socket}
-            end;
-        {error, closed} ->
-            disconnect(Socket),
-            case connect(Ip, Port, Pass) of
-                {ok, Socket1} ->
-                    send_recv(Socket1, Ip, Port, Pass, Packet, Retries);
-                _ ->
-                    send_recv(Socket, Ip, Port, Pass, Packet, Retries-1)
-            end;
-        Error ->
-            disconnect(Socket),
-            Error
-    end.
-
-read_resp(Socket, undefined) ->
-    read_resp(Socket);
-
-read_resp(Socket, PipelinedPacketCount) ->
-    read_resp(Socket, PipelinedPacketCount, []).
-
-read_resp(_Socket, 0, Acc) ->
-    lists:reverse(Acc);
-
-read_resp(Socket, PipelinedPacketCount, Acc) ->
-    read_resp(Socket, PipelinedPacketCount-1, [read_resp(Socket)|Acc]).
-
-read_resp(Socket) ->
-    inet:setopts(Socket, [{packet, line}]),
-    case gen_tcp:recv(Socket, 0) of
-        {ok, <<"+", Rest/binary>>} ->
-            strip_nl(Rest);
-        {ok, <<"-", Rest/binary>>} ->
-            {redis_error, strip_nl(Rest)};
-        {ok, <<":", Rest/binary>>} ->
-            Int = strip_nl(Rest),
-            list_to_integer(binary_to_list(Int));
-        {ok, <<"$", Size/binary>>} ->
-            Size1 = list_to_integer(binary_to_list(strip_nl(Size))),
-            read_body(Socket, Size1);
-        {ok, <<"*", Rest/binary>>} ->
-            Count = list_to_integer(binary_to_list(strip_nl(Rest))),
-            read_multi_bulk(Socket, Count, []);
-        {error, Err} ->
-            disconnect(Socket),
-            {error, Err}
-    end.
-
-strip_nl(B) when is_binary(B) ->
-    S = size(B) - size(?NL),
-    <<B1:S/binary, _/binary>> = B,
-    B1.
-    
-read_body(_Socket, -1) ->
-    undefined;
-
-read_body(Socket, Size) ->
-    inet:setopts(Socket, [{packet, raw}]),
-    case gen_tcp:recv(Socket, Size + size(?NL)) of
-        {error, Error} ->
-            disconnect(Socket),
-            {error, Error};
-        {ok, <<Body:Size/binary, _/binary>>} ->
-            Body
-    end.
-
-read_multi_bulk(_Socket, 0, Acc) ->
-    lists:reverse(Acc);
-
-read_multi_bulk(Socket, Count, Acc) ->
-    Resp =
-        case read_resp(Socket) of
-            {redis_error, Err} -> {error, Err};
-            Other -> Other
-        end,
-    read_multi_bulk(Socket, Count-1, [Resp|Acc]).
-
-pipelined_packet_count(Packets) when is_list(Packets) ->
-    length(Packets);
-
-pipelined_packet_count(Packet) when is_binary(Packet) ->
-    undefined.

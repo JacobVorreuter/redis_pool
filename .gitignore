@@ -1,4 +1,4 @@
 *.rdb
-ebin/*.beam
+ebin/*
 *.dump
 release/*.boot

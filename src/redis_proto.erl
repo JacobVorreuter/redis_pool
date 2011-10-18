@@ -51,9 +51,9 @@ build(Args) when is_list(Args) ->
 
 build_request(Args) ->
     Count = length(Args),
-    Args1 = [begin
+    Args1 = [
         [<<"$">>, integer_to_list(iolist_size(Arg)), ?NL, Arg, ?NL]
-     end || Arg <- Args],
+       || Arg <- Args],
     iolist_to_binary(["*", integer_to_list(Count), ?NL, Args1, ?NL]).
 
 build_pipelined_request([], Acc) ->

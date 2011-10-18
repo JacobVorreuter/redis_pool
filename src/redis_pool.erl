@@ -181,12 +181,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%--------------------------------------------------------------------
 start_workers(Num, Opts) ->
-    start_workers(Num, Opts, []).
-
-start_workers(0, _Opts, Acc) ->
-    Acc;
-
-start_workers(Num, Opts, Acc) ->
-    {ok, Pid} = redis_pid_sup:start_child(self(), Opts),
-    erlang:monitor(process, Pid),
-    start_workers(Num-1, Opts, [Pid|Acc]).
+    [
+        begin
+            {ok, Pid} = redis_pid_sup:start_child(self(), Opts),
+            erlang:monitor(process, Pid),
+            Pid
+        end
+        || _ <- lists:seq(1, Num)
+    ].

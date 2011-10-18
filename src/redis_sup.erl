@@ -32,5 +32,6 @@ start_link() ->
 init([]) ->
     {ok, {{one_for_one, 100, 1}, [
         {redis_pool_sup, {redis_pool_sup, start_link, []}, permanent, 10000, worker, [redis_pool_sup]},
-        {redis_pid_sup, {redis_pid_sup, start_link, []}, permanent, 10000, worker, [redis_pid_sup]}
+        {redis_pid_sup, {redis_pid_sup, start_link, []}, permanent, 10000, worker, [redis_pid_sup]},
+        {redis_subscribers_sup, {redis_subscribers_sup, start_link, []}, permanent, 10000, worker, [redis_subscribers_sup]}
     ]}}.
